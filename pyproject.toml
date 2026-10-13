@@ -1,0 +1,35 @@
+[project]
+name = "calibration-shift"
+version = "0.1.0"
+description = "Check and correct a risk model's calibration when the case mix changes."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Adithya Krishnan" }]
+keywords = ["calibration", "clinical-prediction", "dataset-shift", "risk-model", "recalibration"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
+dependencies = ["numpy>=1.22"]
+
+[project.urls]
+Homepage = "https://github.com/real-adi1806/calibration-shift"
+Issues = "https://github.com/real-adi1806/calibration-shift/issues"
+
+[project.scripts]
+calshift = "calshift.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["calshift*"]
