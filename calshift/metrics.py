@@ -10,18 +10,34 @@ import numpy as np
 EPS = 1e-6
 
 
+def _probabilities(p):
+    p = np.asarray(p, dtype=float).ravel()
+    if np.any(~np.isfinite(p)) or np.any(p < 0) or np.any(p > 1):
+        raise ValueError("p must be probabilities between 0 and 1")
+    return p
+
+
 def _arrays(y, p):
     y = np.asarray(y, dtype=float).ravel()
-    p = np.asarray(p, dtype=float).ravel()
+    p = _probabilities(p)
     if y.shape != p.shape:
         raise ValueError("y and p must have the same length, got %d and %d" % (len(y), len(p)))
     if len(y) == 0:
         raise ValueError("y and p are empty")
     if not np.all((y == 0) | (y == 1)):
         raise ValueError("y must contain only 0 and 1")
-    if np.any(~np.isfinite(p)) or np.any(p < 0) or np.any(p > 1):
-        raise ValueError("p must be probabilities between 0 and 1")
     return y, p
+
+
+def _scale_odds(p, factor):
+    """Multiply every prediction's odds by `factor`, exactly and without clipping.
+
+    Equivalent to adding log(factor) to every logit, but 0 and 1 stay 0 and 1
+    and no two different predictions can become equal, so the ranking (and the
+    AUC) cannot change. Going through a clipped logit tied every prediction
+    below 1e-6.
+    """
+    return p * factor / (p * factor + (1 - p))
 
 
 def logit(p):
@@ -151,19 +167,36 @@ def calibration_slope(y, p):
     return logistic_recalibration(y, p)[1]
 
 
-def expected_calibration_error(y, p, bins=10):
-    """ECE over equal-count bins, ordered by predicted risk.
+def _tie_safe_edges(sorted_p, edges):
+    """Move each inner bin edge to the nearest boundary between different predictions."""
+    moved = [0]
+    for e in edges[1:-1]:
+        lo = int(np.searchsorted(sorted_p, sorted_p[e], side="left"))
+        hi = int(np.searchsorted(sorted_p, sorted_p[e], side="right"))
+        if lo < e < hi:
+            e = lo if e - lo < hi - e else hi
+        if e > moved[-1]:
+            moved.append(e)
+    if moved[-1] < len(sorted_p):
+        moved.append(len(sorted_p))
+    return moved
 
-    With heavily tied predictions (a model on two variables has many), patients
-    with the same prediction can fall either side of a bin edge, so ECE then
-    depends slightly on the order of the input rows. That is a property of
-    equal-count ECE, not of this code; report the slope and intercept alongside.
 
-    The sort is stable (mergesort), so tied patients keep their input order and
-    the same file gives the same ECE on every machine. numpy's default sort is
-    not stable: the README's example once read 0.1995 on Windows and 0.2010 on
-    macOS for the same file.
+def expected_calibration_error(y, p, bins=10, ties="group"):
+    """ECE over bins of about equal size, ordered by predicted risk.
+
+    ties="group" (the default): patients with the same prediction always share
+    a bin. An edge that would fall inside a run of identical predictions moves
+    to the nearest end of that run, so bins are only roughly equal, and the
+    result depends on the predictions alone, never on the order of the rows.
+
+    ties="split": strictly equal-count bins, with tied patients split across an
+    edge in their input order (stable sort). The answer then depends on row
+    order: on the README's example it ranges from 0.1995 to 0.2010 as the rows
+    are shuffled. Kept only to reproduce figures computed that way.
     """
+    if ties not in ("group", "split"):
+        raise ValueError("ties must be 'group' or 'split', got %r" % (ties,))
     y, p = _arrays(y, p)
     n = len(y)
     if n < bins * 2:
@@ -171,6 +204,8 @@ def expected_calibration_error(y, p, bins=10):
     order = np.argsort(p, kind="mergesort")
     y, p = y[order], p[order]
     edges = np.linspace(0, n, bins + 1).astype(int)
+    if ties == "group":
+        edges = _tie_safe_edges(p, edges)
     total = 0.0
     for a, b in zip(edges[:-1], edges[1:]):
         if b > a:

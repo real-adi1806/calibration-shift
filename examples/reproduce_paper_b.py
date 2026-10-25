@@ -17,7 +17,8 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 from calshift import (  # noqa: E402
-    at_prevalence, audit, bootstrap_ci, observed_over_expected, prior_shift, recalibrate_intercept,
+    at_prevalence, audit, bootstrap_ci, expected_calibration_error, observed_over_expected, prior_shift,
+    recalibrate_intercept,
 )
 
 # What the paper reports for model A (age and sex) on the pooled held-out split.
@@ -30,7 +31,8 @@ PAPER = {
     "calibration_slope": 1.310646, "ece": 0.199464, "brier": 0.188968,
     "oe_ci": (0.6529, 0.7824),
     # The ECE figures are the paper's stable-sort values (table 4.3 note in the revised
-    # paper: 0.1995, 0.0799, 0.0710). Its headline ECE is the mean over 5,000 random
+    # paper: 0.1995, 0.0799, 0.0710), so they are checked with ties="split", the binning
+    # that produced them; calshift's default keeps tied predictions in one bin instead. Its headline ECE is the mean over 5,000 random
     # orderings of tied predictions, which a single fixed ordering does not give. 0.078033 was
     # an earlier, unstable-sort value.
     "prior_shift": {"observed_over_expected": 0.9082, "ece": 0.079939},
@@ -70,6 +72,7 @@ def main(paper_b_root):
     print("held-out split: n=%d, prevalence %.4f; fitted at %.4f\n" % (len(yh), yh.mean(), source))
     ok = []
     r = audit(yh, p)
+    r["ece"] = expected_calibration_error(yh, p, ties="split")
     for k in ("auc", "observed_over_expected", "calibration_intercept", "calibration_slope", "ece", "brier"):
         ok.append(check(k, r[k], PAPER[k], 5e-6))
     lo, hi = bootstrap_ci(yh, p, observed_over_expected, n_boot=2000, seed=42)
@@ -79,10 +82,12 @@ def main(paper_b_root):
     shifted = prior_shift(p, source, yh.mean())
     rs = audit(yh, shifted)
     ok.append(check("prior shift: O/E", rs["observed_over_expected"], PAPER["prior_shift"]["observed_over_expected"], 5e-5))
-    ok.append(check("prior shift: ECE", rs["ece"], PAPER["prior_shift"]["ece"], 5e-6))
+    ok.append(check("prior shift: ECE", expected_calibration_error(yh, shifted, ties="split"),
+                    PAPER["prior_shift"]["ece"], 5e-6))
     ok.append(check("prior shift: AUC unchanged", rs["auc"], r["auc"], 0.0))
     refit, _ = recalibrate_intercept(yh, p)
-    ok.append(check("intercept refit: ECE", audit(yh, refit)["ece"], PAPER["refit"]["ece"], 5e-6))
+    ok.append(check("intercept refit: ECE", expected_calibration_error(yh, refit, ties="split"),
+                    PAPER["refit"]["ece"], 5e-6))
     sim = at_prevalence(yh, p, 0.05, source_prevalence=source, draws=2000, seed=42)
     ok.append(check("resampled to 5%: O/E", sim["observed_over_expected"], PAPER["screening_0.05"], 5e-5))
 

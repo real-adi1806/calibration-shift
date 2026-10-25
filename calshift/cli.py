@@ -11,16 +11,30 @@ from .metrics import audit, bootstrap_ci, observed_over_expected
 from .simulate import at_prevalence
 
 
+def _number(row, col, line):
+    value = row.get(col)
+    if value is None or not value.strip():
+        raise ValueError("row %d: column %r is empty" % (line, col))
+    try:
+        return float(value)
+    except ValueError:
+        raise ValueError("row %d: column %r is not a number: %r" % (line, col, value)) from None
+
+
 def _read(path, prob_col, label_col=None):
-    with open(path, newline="", encoding="utf-8") as f:
-        rows = list(csv.DictReader(f))
+    try:
+        with open(path, newline="", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+    except (OSError, UnicodeDecodeError) as e:
+        raise ValueError("cannot read %s: %s" % (path, getattr(e, "strerror", None) or e)) from None
     if not rows:
-        raise SystemExit("error: %s has no rows" % path)
+        raise ValueError("%s has no rows" % path)
     for col in [c for c in (prob_col, label_col) if c]:
         if col not in rows[0]:
-            raise SystemExit("error: column %r not in %s (columns: %s)" % (col, path, ", ".join(rows[0])))
-    p = np.array([float(r[prob_col]) for r in rows])
-    y = np.array([float(r[label_col]) for r in rows]) if label_col else None
+            raise ValueError("column %r not in %s (columns: %s)" % (col, path, ", ".join(rows[0])))
+    # Row numbers count the header as row 1, as a spreadsheet would show them.
+    p = np.array([_number(r, prob_col, i) for i, r in enumerate(rows, start=2)])
+    y = np.array([_number(r, label_col, i) for i, r in enumerate(rows, start=2)]) if label_col else None
     return rows, y, p
 
 
@@ -30,7 +44,7 @@ def _print_audit(name, r):
     print("    observed / expected      %.4f   (1 is right; below 1 = predicts too much risk)" % r["observed_over_expected"])
     print("    calibration intercept    %.4f   (0 is right)" % r["calibration_intercept"])
     print("    calibration slope        %.4f   (1 is right)" % r["calibration_slope"])
-    print("    ECE                      %.4f   (10 equal-count bins)" % r["ece"])
+    print("    ECE                      %.4f   (10 bins, tied predictions kept together)" % r["ece"])
     print("    Brier                    %.4f" % r["brier"])
 
 
@@ -59,7 +73,7 @@ def cmd_shift(a):
         for r, v in zip(rows, q):
             w.writerow({**r, out_col: "%.10f" % v})
     print("wrote %s: %d rows, column %r added (mean risk %.4f -> %.4f)" % (a.out, len(rows), out_col, p.mean(), q.mean()))
-    print("ranking is unchanged, so AUC is identical; check the calibration slope on labelled data if you have any")
+    print("ranking is unchanged, so AUC is identical. This correction can only move the calibration intercept; check the intercept and the slope on labelled data if you have any")
     return 0
 
 

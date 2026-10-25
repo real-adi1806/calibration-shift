@@ -65,7 +65,7 @@ $ calshift audit examples/cimt_heldout.csv --ci
     observed / expected      0.7188   (1 is right; below 1 = predicts too much risk)
     calibration intercept    -1.3242   (0 is right)
     calibration slope        1.3106   (1 is right)
-    ECE                      0.1995   (10 equal-count bins)
+    ECE                      0.1992   (10 bins, tied predictions kept together)
     Brier                    0.1890
     O/E 95% bootstrap CI     0.6529 to 0.7824  (2000 draws)
 ```
@@ -78,7 +78,7 @@ An AUC of 0.89 looks healthy. But the model predicts about 39% more risk than ex
 ```
 $ calshift shift examples/cimt_heldout.csv --source-prevalence 0.7314 --target-prevalence 0.5 --out shifted.csv
 wrote shifted.csv: 300 rows, column 'p_shifted' added (mean risk 0.6956 -> 0.5506)
-ranking is unchanged, so AUC is identical; check the calibration slope on labelled data if you have any
+ranking is unchanged, so AUC is identical. This correction can only move the calibration intercept; check the intercept and the slope on labelled data if you have any
 
 $ calshift audit shifted.csv --prob p_shifted
   audit                  n=300  prevalence=0.5000  mean predicted=0.5506
@@ -86,16 +86,25 @@ $ calshift audit shifted.csv --prob p_shifted
     observed / expected      0.9081   (1 is right; below 1 = predicts too much risk)
     calibration intercept    -0.3225   (0 is right)
     calibration slope        1.3106   (1 is right)
-    ECE                      0.0800   (10 equal-count bins)
+    ECE                      0.0807   (10 bins, tied predictions kept together)
     Brier                    0.1370
 ```
 
-The AUC is identical to six decimal places, and it has to be: the correction never changes the
-order of patients. Calibration improves from 0.72 to 0.91 observed over expected. **The slope
-does not move.** That residual is real. The correction assumes a case looks the same in both
-populations, and here the held-out cases are older than the ones the model learned from (55.4
-against 52.4 years), which plausibly explains it; that has not been tested by intervention.
-`recalibrate_logistic` fixes the slope too, but it needs outcome labels from the new site.
+The AUC is identical to six decimal places, and it has to be: the correction multiplies every
+patient's odds by the same number (computed exactly, with no clipping), so the order of patients
+cannot change. Calibration improves from 0.72 to 0.91 observed over expected.
+
+**What the correction cannot touch.** Adding the same constant to every log-odds can only move
+the calibration intercept; the calibration slope is unchanged by construction (1.3106 before and
+after), so the slope is not evidence about the correction either way. What matters is where the
+two numbers end up. If the only difference between the populations were prevalence, and the
+model was calibrated where it was fitted, the corrected intercept would sit near 0 and the slope
+near 1. Here the intercept is still -0.32 after the correction and the slope is 1.31 (its 95%
+interval in the accompanying audit is 1.04 to 1.73), so the held-out population differs in more
+than prevalence. Its cases are older than the ones the model learned from (55.4 against 52.4
+years), which plausibly explains it; that has not been tested by intervention.
+`recalibrate_logistic` fixes the intercept and the slope, but it needs outcome labels from the new
+site.
 
 **Ask what happens at a screening prevalence:**
 
@@ -105,8 +114,8 @@ $ calshift simulate examples/cimt_heldout.csv --source-prevalence 0.7314 --targe
   target   O/E      95% CI              over-predicts   ECE      O/E after prior shift
   0.0500   0.0936   0.0885 to 0.0991    10.69 x        0.4848   0.9337
   0.1000   0.1810   0.1719 to 0.1911     5.52 x        0.4528   0.9072
-  0.2000   0.3401   0.3238 to 0.3565     2.94 x        0.3884   0.8933
-  0.5000   0.7191   0.6948 to 0.7447     1.39 x        0.2027   0.9089
+  0.2000   0.3401   0.3238 to 0.3565     2.94 x        0.3885   0.8933
+  0.5000   0.7191   0.6948 to 0.7447     1.39 x        0.2037   0.9089
 ```
 
 At 10% prevalence, the uncorrected model over-predicts risk by 5.5 times.
@@ -132,7 +141,7 @@ at_prevalence(y, p, 0.10, source_prevalence=0.73)      # resampled what-if
 | observed / expected | 1 | below 1: the model predicts more risk than happens |
 | calibration intercept | 0 | negative: predictions too high overall |
 | calibration slope | 1 | below 1: too extreme; above 1: too bunched together |
-| ECE | 0 | average gap between predicted and observed, over 10 equal-count bins |
+| ECE | 0 | average gap between predicted and observed, over 10 bins of about equal size; patients with the same prediction always share a bin |
 
 The hierarchy follows Van Calster et al., *J Clin Epidemiol* 2016;74:167-76. The one-number
 correction is the prior-probability adjustment of Saerens, Latinne and Decaestecker, *Neural
@@ -145,15 +154,19 @@ on the example above instead of 1.3106.
 - **Not a medical device and not for decisions about patients.** It measures and adjusts model
   outputs for research and evaluation.
 - **The one-number correction only fixes a change in how common the condition is.** If cases
-  in the new population look different (older, more or less severe), a residual remains, and
-  the slope is where it shows. Always report the slope after correcting.
+  in the new population look different (older, more or less severe), a residual remains. It
+  shows as a calibration intercept still away from 0 after correcting, and a slope away from 1
+  (which the correction cannot change). Always report both after correcting.
 - **The simulation changes the mix of cases and controls, not what a case looks like.** A real
   screening population usually has milder disease. Treat it as the prevalence part of a shift,
   isolated, not a forecast.
-- **ECE with many tied predictions** (a model on two variables has lots) can depend slightly on
-  the order of rows, because tied patients can fall either side of a bin edge. The sort is
-  stable, so the same file gives the same ECE on every machine. The slope and intercept don't
-  have this problem.
+- **ECE depends on how predictions are binned.** A model on two variables gives many tied
+  predictions (101 distinct values among the example's 300 patients). Equal-count bins that
+  split tied patients by row order made the example's ECE range from 0.1995 to 0.2010 as the
+  rows were shuffled, so calshift keeps identical predictions in one bin and moves each edge to
+  the nearest tie boundary: the bins are about equal in size and the result never depends on
+  row order. `expected_calibration_error(y, p, ties="split")` gives the older split binning, only
+  for reproducing figures computed that way. The slope and intercept involve no binning.
 - **The calibration slope can be undefined.** If one cut on the predictions separates the
   outcomes perfectly, no finite slope exists; you get `nan` and a warning rather than a huge
   meaningless number. Otherwise the fit is checked before it is returned (the score equations
@@ -175,8 +188,10 @@ python examples/reproduce_paper_b.py PATH/TO/fundus-cimt-calibration-audit
 `examples/reproduce_paper_b.py` rebuilds the example's predictions
 with that analysis's own code and checks 13 of its figures: all 13 match (ranking, observed /
 expected, intercept, slope, Brier and ECE). The ECE figures are checked against the paper's
-stable-sort values; the paper's headline ECE is an average over 5,000 orderings of tied
-predictions (see the note on ECE above), which a single fixed ordering of the rows does not give.
+stable-sort values with `ties="split"`, the binning that produced them; the paper's headline ECE
+is an average over 5,000 orderings of tied predictions (see the note on ECE above). With tied
+predictions kept together, the prevalence correction closes 93.3% of the ECE gap to the intercept
+refit, inside the 88% to 95% range the paper reports across orderings.
 
 ## Tests
 

@@ -165,7 +165,8 @@ def test_ece_hand_example():
     assert expected_calibration_error(y, p, bins=2) == pytest.approx(expected)
 
 
-def test_ece_ties_keep_input_order_so_every_machine_agrees():
+def test_ece_split_ties_keep_input_order_so_every_machine_agrees():
+    # The older binning, kept only to reproduce the paper's stable-sort figures.
     # 1,000 rows, only 7 distinct predictions, so ties straddle every bin edge.
     # Small arrays would not test this: numpy sorts them stably whatever it is
     # asked, so the array has to be long enough for an unstable sort to reorder.
@@ -178,7 +179,35 @@ def test_ece_ties_keep_input_order_so_every_machine_agrees():
     edges = np.linspace(0, 1000, 11).astype(int)
     expected = sum((b - a) / 1000 * abs(ys[a:b].mean() - ps[a:b].mean())
                    for a, b in zip(edges[:-1], edges[1:]))
-    assert expected_calibration_error(y, p) == pytest.approx(expected, abs=1e-12)
+    assert expected_calibration_error(y, p, ties="split") == pytest.approx(expected, abs=1e-12)
+
+
+def test_ece_does_not_depend_on_row_order():
+    # Same data as above. Splitting tied patients across a bin edge by row order
+    # moved the example file's ECE between 0.1995 and 0.2010; by default tied
+    # predictions now always share a bin, so shuffling the rows changes nothing.
+    rng = np.random.default_rng(3)
+    p = rng.choice([0.2, 0.35, 0.5, 0.6, 0.7, 0.8, 0.9], size=1000)
+    y = (rng.random(1000) < p).astype(int)
+    first = expected_calibration_error(y, p)
+    for seed in range(20):
+        i = np.random.default_rng(seed).permutation(1000)
+        assert expected_calibration_error(y[i], p[i]) == first
+
+
+def test_ece_keeps_tied_predictions_in_one_bin():
+    # 4 rows at 0.2 then 4 at 0.8; two equal-count bins would put the edge at 4,
+    # which already falls between the groups, so ECE is the two groups' gaps.
+    y = [0, 0, 0, 1, 1, 1, 1, 0]
+    p = [0.2] * 4 + [0.8] * 4
+    expected = 0.5 * abs(0.25 - 0.2) + 0.5 * abs(0.75 - 0.8)
+    assert expected_calibration_error(y, p, bins=2) == pytest.approx(expected)
+    # 3 rows at 0.2, 5 at 0.8: the equal-count edge (4) falls inside the 0.8
+    # group, so it moves to the nearest tie boundary (3) instead of splitting it.
+    y = [0, 0, 1, 1, 1, 1, 1, 0]
+    p = [0.2] * 3 + [0.8] * 5
+    expected = 3 / 8 * abs(1 / 3 - 0.2) + 5 / 8 * abs(0.8 - 0.8)
+    assert expected_calibration_error(y, p, bins=2) == pytest.approx(expected)
 
 
 def test_audit_returns_every_level():
@@ -197,6 +226,36 @@ def test_bad_input_is_refused(y, p):
 def test_prevalence_must_be_a_proportion():
     with pytest.raises(ValueError):
         prior_shift([0.5], 0.7, 1.0)
+
+
+@pytest.mark.parametrize("p", [[0.5, float("nan")], [0.5, 1.7], [-0.2, 0.5], [float("inf")]])
+def test_prior_shift_refuses_what_is_not_a_probability(p):
+    # It used to pass NaN straight through and quietly turn 1.7 into 0.99999.
+    with pytest.raises(ValueError):
+        prior_shift(p, 0.7, 0.5)
+
+
+def test_prior_shift_keeps_the_order_of_extreme_predictions():
+    # Predictions below 1e-6 used to be clipped to the same logit, which tied
+    # them and changed the AUC: here 0.5 (all tied) instead of 1.0.
+    y = np.array([0, 0, 1, 1])
+    p = np.array([1e-12, 1e-10, 1e-8, 0.9])
+    q = prior_shift(p, 0.5, 0.2)
+    assert np.all(np.diff(q) > 0)
+    assert auc(y, q) == auc(y, p) == 1.0
+    # 0 and 1 are certainties and stay certainties.
+    assert list(prior_shift([0.0, 1.0], 0.7, 0.1)) == [0.0, 1.0]
+
+
+def test_prior_shift_moves_the_intercept_and_cannot_move_the_slope():
+    # It adds one constant to every log-odds, so a refit of the slope on the
+    # shifted predictions gives the same slope by construction; only the
+    # intercept changes. The README's reasoning rests on exactly this.
+    y, llr = population(0.4, 3000, seed=21)
+    p = model_fitted_at(llr, 0.7)
+    q = prior_shift(p, 0.7, 0.4)
+    assert calibration_slope(y, q) == pytest.approx(calibration_slope(y, p), abs=1e-9)
+    assert abs(calibration_intercept(y, q)) < abs(calibration_intercept(y, p))
 
 
 # ── simulation ───────────────────────────────────────────────────────────────
@@ -232,3 +291,18 @@ def test_cli_audit_and_shift(tmp_path, capsys):
     with open(out, newline="") as f:
         rows = list(csv.DictReader(f))
     assert len(rows) == 400 and "p_shifted" in rows[0]
+
+
+@pytest.mark.parametrize("content, message", [
+    (None, "cannot read"),                      # the file does not exist
+    ("y,p\n1,0.9\n0\n", "row 3"),               # a row with a missing column
+    ("y,p\n1,0.9\n0,\n", "row 3"),              # an empty cell
+    ("y,p\n1,0.9\n0,abc\n", "not a number"),    # text where a number should be
+])
+def test_cli_explains_a_bad_file_instead_of_crashing(tmp_path, capsys, content, message):
+    path = tmp_path / "preds.csv"
+    if content is not None:
+        path.write_text(content)
+    assert main(["audit", str(path)]) == 2
+    err = capsys.readouterr().err
+    assert message in err and "Traceback" not in err
