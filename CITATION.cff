@@ -1,0 +1,16 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "calibration-shift: check and correct a risk model's calibration when the case mix changes"
+authors:
+  - family-names: Krishnan
+    given-names: Adithya
+version: 0.1.0
+date-released: 2026-10-25
+license: MIT
+repository-code: "https://github.com/real-adi1806/calibration-shift"
+keywords:
+  - calibration
+  - clinical prediction model
+  - dataset shift
+  - prevalence shift
+  - recalibration

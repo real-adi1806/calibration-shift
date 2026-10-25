@@ -1,4 +1,5 @@
 import csv
+import warnings
 
 import numpy as np
 import pytest
@@ -99,12 +100,85 @@ def test_slope_above_one_means_bunched_predictions():
     assert calibration_slope(y, expit(0.5 * (llr + logit(0.3)))) > 1.5
 
 
+def _shifted_case(seed):
+    """Predictions far from 0.5 with a weaker true slope: where plain Newton from (0, 1) blew up."""
+    r = np.random.default_rng(seed)
+    n = int(r.integers(80, 300))
+    z = r.normal(r.uniform(-4, 4), r.uniform(0.3, 2.5), n)
+    a, b = r.uniform(-3, 3), r.uniform(0.1, 1.5)
+    y = (r.random(n) < expit(a + b * z)).astype(float)
+    return y, expit(z)
+
+
+def _is_the_maximum(y, p, a, b):
+    """The definition of the fit, checked directly: the score equations hold and no
+    nearby (a, b) has a higher log-likelihood."""
+    x = logit(p)
+    resid = y - expit(a + b * x)
+    if max(abs(resid.sum()), abs((x * resid).sum())) > 1e-6 * len(y):
+        return False
+
+    def ll(a_, b_):
+        z = a_ + b_ * x
+        return np.sum(y * z - np.logaddexp(0, z))
+
+    best = ll(a, b)
+    return all(ll(a + da, b + db) <= best + 1e-9
+               for da in (-1e-3, 0, 1e-3) for db in (-1e-3, 0, 1e-3))
+
+
+def test_slope_fit_reaches_the_maximum_where_plain_newton_diverged():
+    # Seed 2 is one of the 93 in 400 cases on which the earlier plain Newton raised
+    # "Singular matrix" or returned a slope of about 1e58 (found 25 Oct 2026).
+    y, p = _shifted_case(2)
+    a, b = recalibrate_logistic(y, p)[1]
+    assert np.isfinite(b) and _is_the_maximum(y, p, a, b)
+
+
+def test_slope_fit_is_the_maximum_on_many_random_datasets():
+    for seed in range(150):
+        y, p = _shifted_case(seed)
+        if y.sum() in (0, len(y)):
+            continue
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            a, b = recalibrate_logistic(y, p)[1]
+        if np.isnan(b):
+            x = logit(p)   # nan is only allowed when the outcomes are separated
+            assert x[y == 0].max() <= x[y == 1].min() or x[y == 1].max() <= x[y == 0].min(), seed
+            continue
+        assert _is_the_maximum(y, p, a, b), seed
+
+
+def test_slope_is_nan_with_a_warning_when_outcomes_are_separated():
+    y = np.array([0, 0, 0, 1, 1, 1], dtype=float)
+    p = np.array([0.1, 0.2, 0.3, 0.6, 0.7, 0.8])
+    with pytest.warns(RuntimeWarning, match="separated"):
+        assert np.isnan(calibration_slope(y, p))
+
+
 def test_ece_hand_example():
     # two equal-count bins: {0.1, 0.2} with outcomes {0, 0}, {0.8, 0.9} with {1, 0}
     y = [0, 0, 1, 0]
     p = [0.1, 0.2, 0.8, 0.9]
     expected = 0.5 * abs(0 - 0.15) + 0.5 * abs(0.5 - 0.85)
     assert expected_calibration_error(y, p, bins=2) == pytest.approx(expected)
+
+
+def test_ece_ties_keep_input_order_so_every_machine_agrees():
+    # 1,000 rows, only 7 distinct predictions, so ties straddle every bin edge.
+    # Small arrays would not test this: numpy sorts them stably whatever it is
+    # asked, so the array has to be long enough for an unstable sort to reorder.
+    rng = np.random.default_rng(3)
+    p = rng.choice([0.2, 0.35, 0.5, 0.6, 0.7, 0.8, 0.9], size=1000)
+    y = (rng.random(1000) < p).astype(int)
+    # Reference: Python's sorted() is guaranteed stable, so tied rows keep their order.
+    order = sorted(range(1000), key=lambda i: p[i])
+    ys, ps = y[order], p[order]
+    edges = np.linspace(0, 1000, 11).astype(int)
+    expected = sum((b - a) / 1000 * abs(ys[a:b].mean() - ps[a:b].mean())
+                   for a, b in zip(edges[:-1], edges[1:]))
+    assert expected_calibration_error(y, p) == pytest.approx(expected, abs=1e-12)
 
 
 def test_audit_returns_every_level():

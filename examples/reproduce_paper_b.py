@@ -1,13 +1,14 @@
 """Reproduce the calibration audit of China-Fundus-CIMT with this package.
 
-    python examples/reproduce_paper_b.py PATH/TO/paper-b-calibration
+    python examples/reproduce_paper_b.py PATH/TO/fundus-cimt-calibration-audit
 
 That repository must already have run its pipeline (it needs the public CC0
 dataset in data/ and the features it builds). This script uses that repository's
 own code to rebuild the age and sex model's predictions on the held-out split,
 then measures and corrects them with calshift, and checks every figure against
-the values the paper reports. It needs numpy, pandas and scikit-learn.
+the values the paper reports. It needs numpy, pandas, scipy and scikit-learn.
 """
+import importlib.util
 import os
 import sys
 
@@ -22,13 +23,17 @@ from calshift import (  # noqa: E402
 # What the paper reports for model A (age and sex) on the pooled held-out split.
 PAPER = {
     "auc": 0.894711, "observed_over_expected": 0.718776, "calibration_intercept": -1.324221,
-    # The paper prints 1.310243, which comes from scikit-learn's lbfgs stopping at its
+    # An earlier run printed 1.310243, which came from scikit-learn's lbfgs stopping at its
     # default tolerance. The maximum-likelihood slope is 1.310646: lbfgs at tol 1e-12,
     # newton-cg and this package's Newton-Raphson all agree, and its log-likelihood is
     # higher (-124.04912278 against -124.04912662). Checked against the exact value.
     "calibration_slope": 1.310646, "ece": 0.199464, "brier": 0.188968,
     "oe_ci": (0.6529, 0.7824),
-    "prior_shift": {"observed_over_expected": 0.9082, "ece": 0.078033},
+    # The ECE figures are the paper's stable-sort values (table 4.3 note in the revised
+    # paper: 0.1995, 0.0799, 0.0710). Its headline ECE is the mean over 5,000 random
+    # orderings of tied predictions, which a single fixed ordering does not give. 0.078033 was
+    # an earlier, unstable-sort value.
+    "prior_shift": {"observed_over_expected": 0.9082, "ece": 0.079939},
     "refit": {"ece": 0.071022},
     "screening_0.05": 0.0936,
 }
@@ -41,12 +46,19 @@ def check(name, got, want, tol):
 
 
 def main(paper_b_root):
+    missing = [m for m in ("pandas", "scipy", "sklearn") if importlib.util.find_spec(m) is None]
+    if missing:
+        sys.exit("this script needs pandas, scipy and scikit-learn; missing: %s "
+                 "(pip install pandas scipy scikit-learn)" % ", ".join(missing))
+    if not os.path.isdir(os.path.join(paper_b_root, "src")):
+        sys.exit("%s is not the paper's code repository (no src/ folder); get it from "
+                 "https://github.com/real-adi1806/fundus-cimt-calibration-audit" % paper_b_root)
     sys.path.insert(0, os.path.join(paper_b_root, "src"))
     import calibration_audit as ca  # that repository's own module
 
     loaded = ca.load_real()
     if loaded is None:
-        sys.exit("paper-b-calibration has not built its features yet; run its run_all.py first")
+        sys.exit("the paper's code repository has not built its features yet; run its run_all.py first")
     df, _, _ = loaded
     y = df["label"].values.astype(int)
     A = df[["age", "sex"]].values.astype(np.float64)

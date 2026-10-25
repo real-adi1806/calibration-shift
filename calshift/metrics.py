@@ -3,6 +3,8 @@
 Every function takes y (0/1 outcomes) and p (predicted probabilities) as
 array-likes of the same length.
 """
+import warnings
+
 import numpy as np
 
 EPS = 1e-6
@@ -78,27 +80,71 @@ def calibration_intercept(y, p):
     return float((a_lo + a_hi) / 2.0)
 
 
-def logistic_recalibration(y, p, max_iter=100, tol=1e-12):
-    """Fit y ~ expit(a + b * logit(p)) by Newton-Raphson. Returns (a, b).
+def _loglik(X, y, beta):
+    z = X @ beta
+    return float(np.sum(y * z - np.logaddexp(0.0, z)))
+
+
+def _separated(y, lp):
+    """True when one cut on the logit separates the outcomes (ties at the cut included).
+
+    Then the slope's maximum likelihood estimate does not exist: the likelihood keeps
+    rising as the slope grows without bound.
+    """
+    lo_pos, hi_neg = lp[y == 1].min(), lp[y == 0].max()
+    lo_neg, hi_pos = lp[y == 0].min(), lp[y == 1].max()
+    return hi_neg <= lo_pos or hi_pos <= lo_neg
+
+
+def logistic_recalibration(y, p, max_iter=200, tol=1e-10):
+    """Fit y ~ expit(a + b * logit(p)) by maximum likelihood. Returns (a, b).
 
     b is the calibration slope: 1 is perfect, below 1 means predictions are too
     extreme, above 1 means they are too bunched together.
+
+    Newton-Raphson with step halving: a step is only taken if it raises the
+    log-likelihood, and the answer is only returned if the score equations hold.
+    Plain Newton from (0, 1) diverged or returned a meaningless slope on about one
+    dataset in four in a random test (25 Oct 2026). If the outcomes are perfectly
+    separated by the predictions, no finite slope exists, and (nan, nan) is
+    returned with a warning rather than a large meaningless number.
     """
     y, p = _arrays(y, p)
     if y.sum() in (0, len(y)):
         return float("nan"), float("nan")
-    X = np.column_stack([np.ones(len(y)), logit(p)])
-    beta = np.array([0.0, 1.0])
+    lp = logit(p)
+    if _separated(y, lp):
+        warnings.warn("the outcomes are perfectly separated by the predictions, so the "
+                      "calibration slope is undefined (it would be infinite)", RuntimeWarning)
+        return float("nan"), float("nan")
+    X = np.column_stack([np.ones(len(y)), lp])
+    beta = np.array([calibration_intercept(y, p), 1.0])   # start from the slope-1 fit
+    ll = _loglik(X, y, beta)
     for _ in range(max_iter):
         mu = expit(X @ beta)
         w = mu * (1 - mu)
         grad = X.T @ (y - mu)
+        if np.max(np.abs(grad)) < tol * len(y):
+            return float(beta[0]), float(beta[1])
         hess = (X * w[:, None]).T @ X
-        step = np.linalg.solve(hess, grad)
-        beta = beta + step
-        if np.max(np.abs(step)) < tol:
-            break
-    return float(beta[0]), float(beta[1])
+        try:
+            step = np.linalg.solve(hess, grad)
+        except np.linalg.LinAlgError:
+            step = grad / max(float(np.trace(hess)), 1e-12)   # fall back to a small gradient step
+        for _halving in range(60):
+            new = beta + step
+            new_ll = _loglik(X, y, new)
+            if np.isfinite(new_ll) and new_ll >= ll:
+                break
+            step = step / 2.0
+        else:
+            break   # no step raises the likelihood: stop and let the check below decide
+        beta, ll = new, new_ll
+    mu = expit(X @ beta)
+    if np.all(np.isfinite(beta)) and np.max(np.abs(X.T @ (y - mu))) < 1e-6 * len(y):
+        return float(beta[0]), float(beta[1])
+    warnings.warn("the calibration slope fit did not converge; returning nan", RuntimeWarning)
+    return float("nan"), float("nan")
 
 
 def calibration_slope(y, p):
@@ -112,12 +158,17 @@ def expected_calibration_error(y, p, bins=10):
     with the same prediction can fall either side of a bin edge, so ECE then
     depends slightly on the order of the input rows. That is a property of
     equal-count ECE, not of this code; report the slope and intercept alongside.
+
+    The sort is stable (mergesort), so tied patients keep their input order and
+    the same file gives the same ECE on every machine. numpy's default sort is
+    not stable: the README's example once read 0.1995 on Windows and 0.2010 on
+    macOS for the same file.
     """
     y, p = _arrays(y, p)
     n = len(y)
     if n < bins * 2:
         bins = max(2, n // 5)
-    order = np.argsort(p)
+    order = np.argsort(p, kind="mergesort")
     y, p = y[order], p[order]
     edges = np.linspace(0, n, bins + 1).astype(int)
     total = 0.0
